@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+data/*.db
+data/*.sqlite
+analysis/output/*.png
+analysis/output/*.jpg
+analysis/output/*.pdf
+chroma_db/
