@@ -170,31 +170,6 @@ FinalProject/
 - RAG 问答：输入问题后检索新闻和价格上下文，再调用 DeepSeek 生成回答；未配置 API Key 时会返回本地检索结果。
 - 数据更新：侧边栏提供“更新数据到今天”按钮，会重新爬取数据、生成分析结果并重建 RAG 索引。
 
-## GitHub 上传建议
-
-建议提交到 GitHub 的内容：
-
-- 源代码：`crawler/`、`analysis/`、`ai/`、`app/`、`tests/`
-- 文档：`README.md`、`要求.md`、`docs/`
-- 配置：`.gitignore`、`.env.example`、`requirements.txt`
-
-不建议提交的内容：
-
-- `.env`：包含真实 API Key。
-- `data/gold.db`：本地数据库，体积会变大，也可能包含临时数据。
-- `data/rag/`：本地构建的 RAG/Chroma 索引。
-- `analysis/output/`：运行分析后生成的 CSV/图片结果。
-- `.venv/`、`__pycache__/`、`.pytest_cache/` 等本地环境和缓存。
-
-上传前可以检查：
-
-```powershell
-git status
-python -m pytest
-```
-
-如果要让组员一起修改代码，可以在 GitHub 仓库的 Settings -> Collaborators 中邀请他们。课程项目协作建议使用分支开发和 Pull Request，避免三个人同时直接改 `main` 分支造成冲突。
-
 ## 当前限制与后续方向
 
 - 新闻源仍是 Bing News RSS，覆盖度和事件质量有限；后续可以增加更稳定的财经新闻源。
