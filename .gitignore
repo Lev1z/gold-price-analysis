@@ -1,13 +1,38 @@
+# Environment variables and local secrets
 .env
+!.env.example
+
+# Python virtual environments and caches
 .venv/
 venv/
+env/
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# Local databases and generated RAG indexes
 data/*.db
 data/*.sqlite
+data/*.sqlite3
+data/rag/
+chroma_db/
+
+# Generated analysis outputs
+analysis/output/*.csv
 analysis/output/*.png
 analysis/output/*.jpg
+analysis/output/*.jpeg
 analysis/output/*.pdf
-chroma_db/
+
+# Streamlit and notebook/runtime noise
+.streamlit/secrets.toml
+.ipynb_checkpoints/
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

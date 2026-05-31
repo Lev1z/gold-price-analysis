@@ -1,6 +1,12 @@
 import sqlite3
 
-from crawler.database import get_connection, init_db, upsert_price_rows
+from crawler.database import (
+    cleanup_duplicate_news,
+    get_connection,
+    init_db,
+    upsert_news_rows,
+    upsert_price_rows,
+)
 
 
 def test_init_db_creates_expected_tables(tmp_path):
@@ -40,3 +46,78 @@ def test_upsert_price_rows_is_idempotent(tmp_path):
     assert len(rows) == 1
     assert rows[0]["date"] == "2026-05-26"
     assert rows[0]["close"] == 3315.0
+
+
+def test_cleanup_duplicate_news_keeps_one_title_time_pair(tmp_path):
+    db_path = tmp_path / "gold.db"
+    init_db(db_path)
+
+    with get_connection(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO gold_news (title, publish_time, content, source, url)
+            VALUES (:title, :publish_time, :content, :source, :url)
+            """,
+            [
+                {
+                    "title": "黄金价格大跌",
+                    "publish_time": "2026-05-29 08:00:00",
+                    "content": "a",
+                    "source": "Bing News RSS",
+                    "url": "https://example.com/a",
+                },
+                {
+                    "title": " 黄金 价格 大跌 ",
+                    "publish_time": "2026-05-29 08:00:00",
+                    "content": "b",
+                    "source": "Bing News RSS",
+                    "url": "https://example.com/b",
+                },
+                {
+                    "title": "黄金价格反弹",
+                    "publish_time": "2026-05-29 09:00:00",
+                    "content": "c",
+                    "source": "Bing News RSS",
+                    "url": "https://example.com/c",
+                },
+            ],
+        )
+        conn.commit()
+
+        deleted = cleanup_duplicate_news(conn)
+        rows = conn.execute("SELECT title, publish_time FROM gold_news ORDER BY id").fetchall()
+
+    assert deleted == 1
+    assert [(row["title"], row["publish_time"]) for row in rows] == [
+        ("黄金价格大跌", "2026-05-29 08:00:00"),
+        ("黄金价格反弹", "2026-05-29 09:00:00"),
+    ]
+
+
+def test_upsert_news_rows_updates_existing_title_time_even_when_url_changes(tmp_path):
+    db_path = tmp_path / "gold.db"
+    init_db(db_path)
+
+    first = {
+        "title": "黄金价格大跌",
+        "publish_time": "2026-05-29 08:00:00",
+        "content": "old",
+        "source": "Bing News RSS",
+        "url": "https://example.com/a",
+    }
+    second = {
+        "title": " 黄金 价格 大跌 ",
+        "publish_time": "2026-05-29 08:00:00",
+        "content": "new",
+        "source": "Bing News RSS",
+        "url": "https://example.com/b",
+    }
+
+    with get_connection(db_path) as conn:
+        upsert_news_rows(conn, [first])
+        upsert_news_rows(conn, [second])
+        rows = conn.execute("SELECT title, content, url FROM gold_news").fetchall()
+
+    assert len(rows) == 1
+    assert rows[0]["content"] == "new"
+    assert rows[0]["url"] == "https://example.com/b"
