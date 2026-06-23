@@ -15,24 +15,13 @@ import plotly.graph_objects as go
 
 from analysis.clean_data import clean_news_data, clean_price_data
 from analysis.load_data import load_news_data, load_price_data
+from analysis.news_quality import is_low_quality_news, score_news_relevance
 from analysis.statistics import add_price_indicators
 from crawler.config import DEFAULT_DB_PATH
 
 
-BULLISH_KEYWORDS = ("上涨", "走高", "避险", "买入", "降息", "通胀", "地缘", "冲突")
-BEARISH_KEYWORDS = ("下跌", "承压", "回落", "美债", "美元", "加息", "抛售", "降价")
-RETAIL_NEWS_KEYWORDS = (
-    "多少钱一克",
-    "周大福",
-    "老凤祥",
-    "中国黄金",
-    "金店",
-    "首饰",
-    "一口价",
-    "今日金价",
-    "黄金回收",
-    "金条价格",
-)
+BULLISH_KEYWORDS = ("上涨", "走高", "反弹", "飙升", "突破", "新高", "避险", "买入", "降息")
+BEARISH_KEYWORDS = ("下跌", "大跌", "暴跌", "承压", "回落", "跳水", "跌破", "抛售", "加息")
 EVENT_NEWS_KEYWORDS = (
     "美联储",
     "美元",
@@ -122,21 +111,50 @@ def normalize_news_title(title: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(title))
 
 
-def is_low_quality_news(title: str, content: str = "") -> bool:
-    """过滤金店报价、首饰促销等对宏观金价解释价值较低的新闻。"""
-
-    text = f"{title} {content}"
-    return any(keyword in text for keyword in RETAIL_NEWS_KEYWORDS)
-
-
 def _news_event_score(title: str, content: str = "") -> int:
     """按宏观事件关键词给新闻排序，事件性强的排在前面。"""
 
     text = f"{title} {content}"
-    return sum(1 for keyword in EVENT_NEWS_KEYWORDS if keyword in text)
+    keyword_score = sum(1 for keyword in EVENT_NEWS_KEYWORDS if keyword in text)
+    return keyword_score + score_news_relevance(title, content)
 
 
-def classify_news_items(news: pd.DataFrame, limit: int = 6) -> dict[str, list[dict[str, Any]]]:
+def _count_keyword_hits(text: str, keywords: tuple[str, ...]) -> int:
+    """统计方向关键词命中数。"""
+
+    return sum(1 for keyword in keywords if keyword in text)
+
+
+def classify_news_direction(title: str, content: str = "") -> str:
+    """判断新闻方向。
+
+    标题通常浓缩了行情方向，所以标题命中权重高于正文；正文只作为辅助。
+    """
+
+    title_text = str(title or "")
+    content_text = str(content or "")
+    bullish_score = _count_keyword_hits(title_text, BULLISH_KEYWORDS) * 3
+    bearish_score = _count_keyword_hits(title_text, BEARISH_KEYWORDS) * 3
+    bullish_score += _count_keyword_hits(content_text, BULLISH_KEYWORDS)
+    bearish_score += _count_keyword_hits(content_text, BEARISH_KEYWORDS)
+
+    if bullish_score > bearish_score:
+        return "bullish"
+    if bearish_score > bullish_score:
+        return "bearish"
+    return "related"
+
+
+def _publish_sort_value(row: pd.Series) -> pd.Timestamp:
+    """返回新闻排序用的发布时间，缺失值排到最后。"""
+
+    value = pd.to_datetime(row.get("publish_time"), errors="coerce")
+    if pd.isna(value):
+        return pd.Timestamp.min
+    return value
+
+
+def classify_news_items(news: pd.DataFrame, limit: int | None = 6) -> dict[str, list[dict[str, Any]]]:
     """过滤、去重，并粗略区分利多、利空和普通相关新闻。"""
 
     groups: dict[str, list[dict[str, Any]]] = {
@@ -164,46 +182,91 @@ def classify_news_items(news: pd.DataFrame, limit: int = 6) -> dict[str, list[di
             continue
         ranked_rows.append((_news_event_score(title, content), row))
 
-    ranked_rows.sort(
-        key=lambda pair: (
-            pair[0],
-            pd.to_datetime(pair[1].get("publish_time"), errors="coerce")
-            if pair[1].get("publish_time") is not None
-            else pd.Timestamp.min,
-        ),
-        reverse=True,
-    )
+    ranked_rows.sort(key=lambda pair: (_publish_sort_value(pair[1]), pair[0]), reverse=True)
 
     for _, row in ranked_rows:
-        text = f"{row.get('title', '')} {row.get('content', '')}"
         item = _row_to_news_item(row)
-        if any(keyword in text for keyword in BULLISH_KEYWORDS):
-            bucket = "bullish"
-        elif any(keyword in text for keyword in BEARISH_KEYWORDS):
-            bucket = "bearish"
-        else:
-            bucket = "related"
+        bucket = classify_news_direction(
+            str(row.get("title") or ""),
+            str(row.get("content") or ""),
+        )
 
-        if len(groups[bucket]) < limit:
+        if limit is None or len(groups[bucket]) < limit:
             groups[bucket].append(item)
 
     return groups
 
 
-def filter_price_range(prices: pd.DataFrame, time_range: str = "1Y") -> pd.DataFrame:
+def filter_price_range(
+    prices: pd.DataFrame,
+    time_range: str = "1Y",
+    start_date: object | None = None,
+    end_date: object | None = None,
+) -> pd.DataFrame:
     """按时间范围筛选价格数据，避免默认全量图过度压缩。"""
 
-    if prices.empty or time_range == "ALL":
-        return prices.copy()
-
-    days = TIME_RANGE_DAYS.get(time_range)
-    if days is None:
+    if prices.empty:
         return prices.copy()
 
     working = clean_price_data(prices)
+
+    if time_range == "CUSTOM":
+        if start_date is not None:
+            working = working[working["date"] >= pd.to_datetime(start_date)]
+        if end_date is not None:
+            working = working[working["date"] <= pd.to_datetime(end_date)]
+        return working.reset_index(drop=True)
+
+    if time_range == "ALL":
+        return working
+
+    days = TIME_RANGE_DAYS.get(time_range)
+    if days is None:
+        return working
+
     end_date = pd.to_datetime(working["date"].max())
     start_date = end_date - pd.Timedelta(days=days)
     return working[working["date"] >= start_date].reset_index(drop=True)
+
+
+def calculate_visible_y_range(
+    prices: pd.DataFrame,
+    *,
+    include_ma5: bool = True,
+    include_ma20: bool = True,
+    include_ma60: bool = False,
+    chart_type: str = "line",
+) -> list[float] | None:
+    """按当前可见数据计算 Y 轴范围，避免长周期图压扁早期价格波动。"""
+
+    if prices.empty:
+        return None
+
+    columns = ["close"]
+    if chart_type == "candlestick":
+        columns.extend(column for column in ["high", "low"] if column in prices.columns)
+
+    ma_columns = [
+        (include_ma5, "ma_5"),
+        (include_ma20, "ma_20"),
+        (include_ma60, "ma_60"),
+    ]
+    columns.extend(column for enabled, column in ma_columns if enabled and column in prices.columns)
+    existing_columns = [column for column in columns if column in prices.columns]
+    if not existing_columns:
+        return None
+
+    values = prices[existing_columns].apply(pd.to_numeric, errors="coerce").stack().dropna()
+    if values.empty:
+        return None
+
+    min_value = float(values.min())
+    max_value = float(values.max())
+    if min_value == max_value:
+        padding = abs(min_value) * 0.05 or 1.0
+    else:
+        padding = (max_value - min_value) * 0.08
+    return [max(0.0, min_value - padding), max_value + padding]
 
 
 def create_naive_forecast(
@@ -243,11 +306,13 @@ def create_price_figure(
     show_forecast: bool = False,
     forecast_days: int = 10,
     time_range: str = "1Y",
+    start_date: object | None = None,
+    end_date: object | None = None,
     chart_type: str = "line",
 ) -> go.Figure:
     """创建 Plotly 金价走势图。"""
 
-    ranged_prices = filter_price_range(prices, time_range)
+    ranged_prices = filter_price_range(prices, time_range, start_date, end_date)
     working = add_price_indicators(ranged_prices, windows=(5, 20, 60))
     fig = go.Figure()
 
@@ -337,12 +402,20 @@ def create_price_figure(
         tickfont={"color": "#334155"},
         title_font={"color": "#334155"},
     )
+    y_range = calculate_visible_y_range(
+        working,
+        include_ma5=show_ma5,
+        include_ma20=show_ma20,
+        include_ma60=show_ma60,
+        chart_type=chart_type,
+    )
     fig.update_yaxes(
         showgrid=True,
         gridcolor="#e5e7eb",
         tickfont={"color": "#334155"},
         title_font={"color": "#334155"},
-        autorange=True,
+        autorange=y_range is None,
+        range=y_range,
         fixedrange=False,
     )
     return fig

@@ -63,6 +63,13 @@ def inject_styles() -> None:
             padding: 0.9rem 1rem;
             background: #ffffff;
         }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: minmax(260px, 1.4fr) repeat(4, minmax(140px, 1fr));
+            gap: 1rem;
+            align-items: stretch;
+            margin: 0.8rem 0 1.1rem;
+        }
         .metric-label {
             color: #6b7280;
             font-size: 0.82rem;
@@ -72,6 +79,14 @@ def inject_styles() -> None:
             font-size: 1.15rem;
             font-weight: 720;
             color: #111827;
+        }
+        .metric-value.nowrap {
+            white-space: nowrap;
+        }
+        @media (max-width: 980px) {
+            .metrics-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
         }
         .timeline {
             display: flex;
@@ -88,6 +103,11 @@ def inject_styles() -> None:
             grid-template-columns: 7.8rem minmax(0, 1fr) 10rem;
             gap: 0.6rem;
             align-items: center;
+        }
+        .news-card.detail {
+            grid-template-columns: 8.4rem minmax(0, 1fr) 11rem;
+            align-items: start;
+            padding: 0.7rem 0.75rem;
         }
         .news-time {
             color: #6b7280;
@@ -112,6 +132,15 @@ def inject_styles() -> None:
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+        .news-summary {
+            color: #475569;
+            font-size: 0.78rem;
+            line-height: 1.45;
+            margin-top: 0.25rem;
+        }
+        .news-more-row {
+            margin-top: 0.45rem;
         }
         .section-title {
             font-size: 1.15rem;
@@ -174,6 +203,28 @@ def render_metric_card(label: str, value: str) -> None:
     )
 
 
+def render_metrics_grid(metrics: dict[str, object]) -> None:
+    """渲染非等宽指标卡，让数据范围拥有更大的展示空间。"""
+
+    cards = [
+        ("数据范围", f"{metrics['start_date']} ~ {metrics['end_date']}", "nowrap"),
+        ("最新收盘价", f"{float(metrics['latest_close']):.2f}", ""),
+        ("总涨跌幅", format_percent(float(metrics["total_return"])), ""),
+        ("20日波动率", format_percent(float(metrics["volatility_20"])), ""),
+        ("新闻数量", str(metrics["news_count"]), ""),
+    ]
+    html_parts = ['<div class="metrics-grid">']
+    for label, value, extra_class in cards:
+        html_parts.append(
+            '<div class="metric-card">'
+            f'<div class="metric-label">{escape_html_text(label)}</div>'
+            f'<div class="metric-value {extra_class}">{escape_html_text(value)}</div>'
+            "</div>"
+        )
+    html_parts.append("</div>")
+    st.markdown("\n".join(html_parts), unsafe_allow_html=True)
+
+
 def render_news_timeline(
     title: str,
     items: list[dict],
@@ -195,7 +246,7 @@ def render_news_timeline(
             _render_news_list(hidden_items)
 
 
-def _render_news_list(items: list[dict]) -> None:
+def _render_news_list(items: list[dict], *, show_summary: bool = False) -> None:
     """渲染单行新闻列表。"""
 
     cards = ['<div class="timeline">']
@@ -208,15 +259,84 @@ def _render_news_list(items: list[dict]) -> None:
             title_html = f'<a href="{url}" target="_blank">{title_text}</a>'
         else:
             title_html = title_text
+        title_block = f'<div class="news-title">{title_html}</div>'
+        if show_summary:
+            summary = escape_html_text(item.get("summary", ""))
+            if summary:
+                title_block += f'<div class="news-summary">{summary}</div>'
         cards.append(
-            f'<div class="news-card">'
+            f'<div class="news-card {"detail" if show_summary else ""}">'
             f'<div class="news-time">{publish_time}</div>'
-            f'<div class="news-title">{title_html}</div>'
+            f"<div>{title_block}</div>"
             f'<div class="news-source">{source}</div>'
             f'</div>'
         )
     cards.append("</div>")
     st.markdown("\n".join(cards), unsafe_allow_html=True)
+
+
+def open_news_page(category: str) -> None:
+    """切换到新闻详情视图。"""
+
+    st.session_state["page"] = "news"
+    st.session_state["news_category"] = category
+    st.rerun()
+
+
+def render_news_preview(
+    title: str,
+    items: list[dict],
+    empty_text: str,
+    category: str,
+    visible_count: int = 3,
+) -> None:
+    """主页面新闻预览：只展示少量新闻，把完整列表放到详情页。"""
+
+    st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
+    if not items:
+        st.info(empty_text)
+        return
+
+    _render_news_list(items[:visible_count])
+    if len(items) > visible_count:
+        st.markdown('<div class="news-more-row">', unsafe_allow_html=True)
+        if st.button(f"> 查看更多（{len(items) - visible_count} 条）", key=f"more_{category}"):
+            open_news_page(category)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def render_news_detail_page(news_groups: dict[str, list[dict]]) -> None:
+    """展示全部新闻的独立视图。"""
+
+    st.markdown('<div class="section-title">新闻详情</div>', unsafe_allow_html=True)
+    if st.button("< 返回主页面", key="back_dashboard"):
+        st.session_state["page"] = "dashboard"
+        st.rerun()
+
+    category_options = {
+        "bullish": "利多新闻",
+        "bearish": "利空新闻",
+        "related": "其他相关新闻",
+    }
+    default_category = st.session_state.get("news_category", "bullish")
+    default_index = list(category_options.keys()).index(default_category)
+    selected_label = st.radio(
+        "新闻分类",
+        options=list(category_options.values()),
+        index=default_index,
+        horizontal=True,
+    )
+    selected_category = next(
+        key for key, value in category_options.items() if value == selected_label
+    )
+    st.session_state["news_category"] = selected_category
+
+    items = news_groups[selected_category]
+    st.caption("当前列表按发布时间降序排列；已过滤金店报价、首饰促销等低解释价值新闻。")
+    if not items:
+        st.info("当前分类暂无新闻。")
+        return
+    _render_news_list(items, show_summary=True)
 
 
 def main() -> None:
@@ -227,6 +347,8 @@ def main() -> None:
         '<div class="app-subtitle">爬虫采集 · 数据分析 · 新闻时间轴 · RAG 问答 · 预测展示</div>',
         unsafe_allow_html=True,
     )
+
+    prices, news = cached_dashboard_data()
 
     with st.sidebar:
         st.header("数据更新")
@@ -250,15 +372,31 @@ def main() -> None:
 
         st.divider()
         st.header("图表设置")
-        time_range = st.radio(
+        time_range_label = st.radio(
             "时间范围",
-            options=["1M", "3M", "6M", "1Y", "ALL"],
+            options=["1M", "3M", "6M", "1Y", "ALL", "自定义"],
             index=3,
             horizontal=True,
         )
+        time_range = "CUSTOM" if time_range_label == "自定义" else str(time_range_label)
+        custom_start_date = None
+        custom_end_date = None
+        if time_range == "CUSTOM" and not prices.empty:
+            min_date = prices["date"].min().date()
+            max_date = prices["date"].max().date()
+            custom_dates = st.date_input(
+                "自定义日期范围",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+            )
+            if isinstance(custom_dates, tuple) and len(custom_dates) == 2:
+                custom_start_date, custom_end_date = custom_dates
+
         chart_type_label = st.radio(
             "图表类型",
             options=["收盘价走势", "K线图"],
+            index=1,
             horizontal=True,
         )
         show_ma5 = st.checkbox("显示 MA5", value=True)
@@ -268,21 +406,14 @@ def main() -> None:
         forecast_days = st.slider("预测交易日数量", min_value=5, max_value=30, value=10)
         st.caption("当前预测为简易趋势延伸，用于展示预测区间；后续可替换为 ARIMA/LSTM。")
 
-    prices, news = cached_dashboard_data()
     metrics = compute_dashboard_metrics(prices, news)
-    news_groups = classify_news_items(news)
+    news_groups = classify_news_items(news, limit=None)
 
-    metric_columns = st.columns(5)
-    with metric_columns[0]:
-        render_metric_card("数据范围", f"{metrics['start_date']} ~ {metrics['end_date']}")
-    with metric_columns[1]:
-        render_metric_card("最新收盘价", f"{metrics['latest_close']:.2f}")
-    with metric_columns[2]:
-        render_metric_card("总涨跌幅", format_percent(float(metrics["total_return"])))
-    with metric_columns[3]:
-        render_metric_card("20日波动率", format_percent(float(metrics["volatility_20"])))
-    with metric_columns[4]:
-        render_metric_card("新闻数量", str(metrics["news_count"]))
+    render_metrics_grid(metrics)
+
+    if st.session_state.get("page") == "news":
+        render_news_detail_page(news_groups)
+        return
 
     st.markdown('<div class="section-title">金价走势</div>', unsafe_allow_html=True)
     if prices.empty:
@@ -296,24 +427,25 @@ def main() -> None:
             show_forecast=show_forecast,
             forecast_days=int(forecast_days),
             time_range=str(time_range),
+            start_date=custom_start_date,
+            end_date=custom_end_date,
             chart_type="candlestick" if chart_type_label == "K线图" else "line",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 
-    render_news_timeline(
+    render_news_preview(
         "利多新闻 / 可能推动上涨的事件",
         news_groups["bullish"],
         "暂未匹配到明显利多新闻。",
+        "bullish",
     )
 
-    render_news_timeline(
+    render_news_preview(
         "利空新闻 / 可能推动下跌的事件",
         news_groups["bearish"],
         "暂未匹配到明显利空新闻。",
+        "bearish",
     )
-
-    with st.expander("其他相关新闻", expanded=False):
-        render_news_timeline("相关新闻", news_groups["related"], "暂无其他相关新闻。")
 
     st.markdown('<div class="section-title">RAG 问答</div>', unsafe_allow_html=True)
     question = st.text_input(

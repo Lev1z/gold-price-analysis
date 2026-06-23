@@ -34,6 +34,35 @@ def test_load_news_documents_reads_clean_text(tmp_path):
     assert "避险需求" in docs[0]["text"]
 
 
+def test_load_news_documents_filters_low_quality_jewelry_cpi_news(tmp_path):
+    db_path = tmp_path / "gold.db"
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        upsert_news_rows(
+            conn,
+            [
+                {
+                    "title": "5月份江门CPI同比上涨1.4%黄金饰品价格上涨34.6%",
+                    "publish_time": "2026-06-19 10:00:00",
+                    "content": "居民消费价格指数上涨，黄金饰品价格涨幅较大。",
+                    "source": "test",
+                    "url": "https://example.com/local-cpi",
+                },
+                {
+                    "title": "美国CPI低于预期，现货黄金走高",
+                    "publish_time": "2026-06-20 10:00:00",
+                    "content": "美元指数回落，美债收益率下行，国际金价受到支撑。",
+                    "source": "test",
+                    "url": "https://example.com/macro-gold",
+                },
+            ],
+        )
+
+    docs = load_news_documents(db_path)
+
+    assert [doc["title"] for doc in docs] == ["美国CPI低于预期，现货黄金走高"]
+
+
 def test_split_text_keeps_short_text_and_splits_long_text():
     short_chunks = split_text("短文本", chunk_size=20, overlap=5)
     long_chunks = split_text("黄金价格上涨。" * 20, chunk_size=30, overlap=5)

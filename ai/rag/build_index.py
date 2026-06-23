@@ -14,6 +14,7 @@ from typing import Any
 
 from analysis.clean_data import clean_news_data
 from analysis.load_data import load_news_data
+from analysis.news_quality import is_low_quality_news
 from crawler.config import DEFAULT_DB_PATH, PROJECT_ROOT
 
 
@@ -35,6 +36,8 @@ def load_news_documents(db_path: str | Path = DEFAULT_DB_PATH) -> list[dict[str,
         title = str(row.get("title") or "").strip()
         content = str(row.get("content") or "").strip()
         if not title and not content:
+            continue
+        if is_low_quality_news(title, content):
             continue
 
         text = "\n".join(part for part in [title, content] if part)
