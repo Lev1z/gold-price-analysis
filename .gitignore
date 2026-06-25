@@ -36,6 +36,8 @@ analysis/output/**
 *.pdf
 *.doc
 *.docx
+*.md
+!README.md
 
 # IDE and OS files
 .vscode/
