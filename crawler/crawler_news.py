@@ -1,6 +1,7 @@
 """黄金相关新闻爬虫。
 
-数据源：Bing News RSS。RSS 的好处是结构固定，适合作为课程项目的保底新闻源。
+数据源：东方财富黄金频道 + Bing News RSS。
+东方财富黄金频道更垂直，用于提升新闻质量；Bing RSS 结构固定，作为保底补充源。
 运行示例：
 
     python -m crawler.crawler_news --limit 30
@@ -13,9 +14,10 @@ import html
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import date
 from email.utils import parsedate_to_datetime
 from typing import Iterable
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -23,6 +25,7 @@ from crawler.config import (
     BING_NEWS_QUERIES,
     BING_NEWS_RSS_URL,
     DEFAULT_DB_PATH,
+    EASTMONEY_GOLD_NEWS_URL,
     REQUEST_DELAY_SECONDS,
 )
 from crawler.database import cleanup_duplicate_news, get_connection, init_db, upsert_news_rows
@@ -64,6 +67,25 @@ def normalize_publish_time(value: str | None) -> str | None:
         return value
 
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def normalize_eastmoney_publish_time(
+    value: str | None,
+    current_year: int | None = None,
+) -> str | None:
+    """把东方财富频道页的“6月25日 23:24”转成统一时间字符串。"""
+
+    text = clean_text(value)
+    if not text:
+        return None
+
+    match = re.search(r"(\d{1,2})月(\d{1,2})日\s+(\d{1,2}):(\d{1,2})", text)
+    if not match:
+        return text
+
+    year = current_year or date.today().year
+    month, day, hour, minute = (int(part) for part in match.groups())
+    return f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}:00"
 
 
 def normalize_news_title(title: str | None) -> str:
@@ -137,6 +159,43 @@ def parse_rss_items(xml_text: str) -> list[dict[str, object]]:
     return rows
 
 
+def parse_eastmoney_gold_items(
+    html_text: str,
+    current_year: int | None = None,
+) -> list[dict[str, object]]:
+    """解析东方财富黄金频道首页中的新闻标题和链接。"""
+
+    soup = BeautifulSoup(html_text, "lxml")
+    rows: list[dict[str, object]] = []
+    seen_urls: set[str] = set()
+
+    candidates = list(soup.select(".top_title a[href]")) + list(soup.select("p.title a[href]"))
+    for link in candidates:
+        title = clean_text(link.get_text(" ", strip=True))
+        url = canonicalize_news_url(urljoin(EASTMONEY_GOLD_NEWS_URL, link.get("href", "")))
+        if not title or not url or url in seen_urls:
+            continue
+
+        container = link.find_parent("div")
+        time_node = container.select_one(".time") if container else None
+        publish_time = normalize_eastmoney_publish_time(
+            time_node.get_text(" ", strip=True) if time_node else None,
+            current_year=current_year,
+        )
+        rows.append(
+            {
+                "title": title,
+                "publish_time": publish_time,
+                "content": "",
+                "source": "东方财富黄金频道",
+                "url": url,
+            }
+        )
+        seen_urls.add(url)
+
+    return rows
+
+
 def fetch_article_text(url: str, max_paragraphs: int = 12) -> str:
     """尝试进入新闻原文页抓正文。
 
@@ -174,6 +233,15 @@ def fetch_rss_rows(query: str) -> list[dict[str, object]]:
     return parse_rss_items(response.text)
 
 
+def fetch_eastmoney_gold_rows() -> list[dict[str, object]]:
+    """请求东方财富黄金频道，并解析其中的垂直财经新闻。"""
+
+    response = get_response(EASTMONEY_GOLD_NEWS_URL)
+    # 该页面偶尔返回错误的 ISO-8859-1 编码头，显式按 UTF-8 解析可避免中文乱码。
+    html_text = response.content.decode("utf-8-sig", errors="replace")
+    return parse_eastmoney_gold_items(html_text)
+
+
 def deduplicate_rows(rows: Iterable[dict[str, object]]) -> list[dict[str, object]]:
     """按规范化 URL 或“标题+发布时间”去重。"""
 
@@ -205,6 +273,12 @@ def fetch_gold_news_rows(
     """抓取黄金相关新闻，并尽量补充正文内容。"""
 
     rows: list[dict[str, object]] = []
+    try:
+        rows.extend(fetch_eastmoney_gold_rows())
+    except RuntimeError as exc:
+        print(f"Warning: Eastmoney gold news failed, skipped: {exc}")
+    time.sleep(REQUEST_DELAY_SECONDS)
+
     for query in queries:
         try:
             rows.extend(fetch_rss_rows(query))

@@ -3,8 +3,10 @@ from crawler.crawler_news import (
     canonicalize_news_url,
     clean_text,
     deduplicate_rows,
+    normalize_eastmoney_publish_time,
     normalize_news_title,
     normalize_publish_time,
+    parse_eastmoney_gold_items,
     parse_rss_items,
 )
 
@@ -55,12 +57,50 @@ def test_parse_rss_items():
     assert rows[0]["publish_time"] == "2026-05-29 10:30:00"
 
 
+def test_parse_eastmoney_gold_items():
+    html_text = """
+    <div class="top_title">
+      <a href="https://finance.eastmoney.com/a/202606253782807944.html">金饰克价年内暴跌近500元</a>
+    </div>
+    <div class="gl_con">
+      <p class="title" title="重要数据出炉 美联储加息生变！黄金短线走高">
+        <a href="https://finance.eastmoney.com/a/202606253783456291.html">重要数据出炉 美联储加息生变！黄金短线走高</a>
+      </p>
+      <p class="time">6月25日 23:22</p>
+    </div>
+    """
+
+    rows = parse_eastmoney_gold_items(html_text, current_year=2026)
+
+    assert rows == [
+        {
+            "title": "金饰克价年内暴跌近500元",
+            "publish_time": None,
+            "content": "",
+            "source": "东方财富黄金频道",
+            "url": "https://finance.eastmoney.com/a/202606253782807944.html",
+        },
+        {
+            "title": "重要数据出炉 美联储加息生变！黄金短线走高",
+            "publish_time": "2026-06-25 23:22:00",
+            "content": "",
+            "source": "东方财富黄金频道",
+            "url": "https://finance.eastmoney.com/a/202606253783456291.html",
+        },
+    ]
+
+
 def test_clean_text_removes_html():
     assert clean_text("<p>黄金&nbsp;<b>价格</b></p>") == "黄金 价格"
 
 
 def test_normalize_publish_time_keeps_unknown_format():
     assert normalize_publish_time("2026/05/29") == "2026/05/29"
+
+
+def test_normalize_eastmoney_publish_time():
+    assert normalize_eastmoney_publish_time("6月25日 23:24", current_year=2026) == "2026-06-25 23:24:00"
+    assert normalize_eastmoney_publish_time("") is None
 
 
 def test_canonicalize_news_url_extracts_bing_target_and_strips_tracking():

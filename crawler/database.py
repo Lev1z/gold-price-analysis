@@ -137,6 +137,19 @@ def upsert_news_rows(
                     break
 
         if existing_id is not None:
+            url = row.get("url")
+            if url:
+                url_owner = conn.execute(
+                    "SELECT id FROM gold_news WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if url_owner is not None and url_owner["id"] != existing_id:
+                    current = conn.execute(
+                        "SELECT url FROM gold_news WHERE id = ?",
+                        (existing_id,),
+                    ).fetchone()
+                    url = current["url"] if current else url
+
             conn.execute(
                 """
                 UPDATE gold_news
@@ -153,7 +166,7 @@ def upsert_news_rows(
                     "publish_time": publish_time,
                     "content": row.get("content"),
                     "source": row.get("source"),
-                    "url": row.get("url"),
+                    "url": url,
                 },
             )
             count += 1

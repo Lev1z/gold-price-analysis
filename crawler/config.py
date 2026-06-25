@@ -25,6 +25,9 @@ BING_NEWS_QUERIES = [
     "COMEX 黄金",
 ]
 
+# 东方财富黄金频道：垂直财经源，优先用于提升新闻质量；Bing RSS 仍作为补充保底。
+EASTMONEY_GOLD_NEWS_URL = "https://gold.eastmoney.com/"
+
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

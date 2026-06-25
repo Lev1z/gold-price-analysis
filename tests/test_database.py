@@ -121,3 +121,51 @@ def test_upsert_news_rows_updates_existing_title_time_even_when_url_changes(tmp_
     assert len(rows) == 1
     assert rows[0]["content"] == "new"
     assert rows[0]["url"] == "https://example.com/b"
+
+
+def test_upsert_news_rows_keeps_existing_url_when_new_url_belongs_to_another_row(tmp_path):
+    db_path = tmp_path / "gold.db"
+    init_db(db_path)
+
+    with get_connection(db_path) as conn:
+        upsert_news_rows(
+            conn,
+            [
+                {
+                    "title": "黄金价格大跌",
+                    "publish_time": "2026-05-29 08:00:00",
+                    "content": "old",
+                    "source": "Bing News RSS",
+                    "url": "https://example.com/a",
+                },
+                {
+                    "title": "黄金价格反弹",
+                    "publish_time": "2026-05-29 09:00:00",
+                    "content": "other",
+                    "source": "Bing News RSS",
+                    "url": "https://example.com/b",
+                },
+            ],
+        )
+
+        upsert_news_rows(
+            conn,
+            [
+                {
+                    "title": " 黄金 价格 大跌 ",
+                    "publish_time": "2026-05-29 08:00:00",
+                    "content": "new",
+                    "source": "东方财富黄金频道",
+                    "url": "https://example.com/b",
+                }
+            ],
+        )
+        rows = conn.execute(
+            "SELECT title, content, source, url FROM gold_news ORDER BY id"
+        ).fetchall()
+
+    assert len(rows) == 2
+    assert rows[0]["content"] == "new"
+    assert rows[0]["source"] == "东方财富黄金频道"
+    assert rows[0]["url"] == "https://example.com/a"
+    assert rows[1]["url"] == "https://example.com/b"
