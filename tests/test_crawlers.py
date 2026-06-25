@@ -6,6 +6,7 @@ from crawler.crawler_news import (
     normalize_eastmoney_publish_time,
     normalize_news_title,
     normalize_publish_time,
+    parse_eastmoney_column_items,
     parse_eastmoney_gold_items,
     parse_rss_items,
 )
@@ -87,6 +88,42 @@ def test_parse_eastmoney_gold_items():
             "source": "东方财富黄金频道",
             "url": "https://finance.eastmoney.com/a/202606253783456291.html",
         },
+    ]
+
+
+def test_parse_eastmoney_column_items():
+    payload = {
+        "data": {
+            "list": [
+                {
+                    "title": "现货黄金突破4040美元/盎司，日内涨1.03%",
+                    "showTime": "2026-06-25 23:24:34",
+                    "summary": "现货黄金突破4040美元/盎司，日内涨1.03%",
+                    "mediaName": "每日经济新闻",
+                    "uniqueUrl": "http://finance.eastmoney.com/a/202606253783458774.html",
+                    "code": "202606253783458774",
+                    "np_dst": "CMS",
+                },
+                {
+                    "title": "",
+                    "showTime": "2026-06-25 23:22:00",
+                    "summary": "empty title should be skipped",
+                    "uniqueUrl": "http://example.com/skip.html",
+                },
+            ]
+        }
+    }
+
+    rows = parse_eastmoney_column_items(payload, column_name="黄金导读")
+
+    assert rows == [
+        {
+            "title": "现货黄金突破4040美元/盎司，日内涨1.03%",
+            "publish_time": "2026-06-25 23:24:34",
+            "content": "现货黄金突破4040美元/盎司，日内涨1.03%",
+            "source": "东方财富黄金频道 / 黄金导读 / 每日经济新闻",
+            "url": "http://finance.eastmoney.com/a/202606253783458774.html",
+        }
     ]
 
 

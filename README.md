@@ -57,7 +57,7 @@ python -m crawler.crawler_gold_price --limit 1000
 抓取新闻数据：
 
 ```powershell
-python -m crawler.crawler_news --limit 100 --no-enrich
+python -m crawler.crawler_news --limit 300 --no-enrich --eastmoney-pages 5
 ```
 
 生成分析结果：
@@ -178,7 +178,7 @@ FinalProject/
 
 价格数据保存到 `data/gold.db` 的 `gold_prices` 表，主键是交易日期。日线数据只包含交易日，所以周末和休市日没有记录是正常现象。
 
-新闻数据保存到 `gold_news` 表。当前优先使用东方财富黄金频道获取更垂直的财经新闻，再使用 Bing News RSS 作为公开保底源补齐数量。Bing 返回的是搜索结果，不是完整新闻归档，因此新闻日期可能不连续。项目已对新闻做两层去重：
+新闻数据保存到 `gold_news` 表。当前优先使用东方财富黄金频道首页和黄金导读、黄金聚焦、金市评论三个栏目分页获取更垂直的财经新闻，再使用 Bing News RSS 作为公开保底源补齐数量。`--eastmoney-pages` 控制每个东方财富栏目最多抓取多少页，设为 0 时只抓首页。Bing 返回的是搜索结果，不是完整新闻归档，因此新闻日期可能不连续。项目已对新闻做两层去重：
 
 - 爬虫层：解析东方财富黄金频道和 Bing RSS，按规范化 URL 和“标题 + 发布时间”去重。
 - 数据库层：URL 不同但“标题 + 发布时间”相同的新闻会更新旧记录，不重复插入。

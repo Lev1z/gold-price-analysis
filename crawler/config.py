@@ -27,6 +27,13 @@ BING_NEWS_QUERIES = [
 
 # 东方财富黄金频道：垂直财经源，优先用于提升新闻质量；Bing RSS 仍作为补充保底。
 EASTMONEY_GOLD_NEWS_URL = "https://gold.eastmoney.com/"
+EASTMONEY_GOLD_COLUMN_API_URL = "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns"
+EASTMONEY_GOLD_COLUMNS = [
+    {"id": "767", "name": "黄金导读", "referer": "https://gold.eastmoney.com/a/chjdd.html"},
+    {"id": "569", "name": "黄金聚焦", "referer": "https://gold.eastmoney.com/a/chjyw.html"},
+    {"id": "570", "name": "金市评论", "referer": "https://gold.eastmoney.com/a/cjspl.html"},
+]
+EASTMONEY_GOLD_COLUMN_DEFAULT_PAGES = 5
 
 REQUEST_HEADERS = {
     "User-Agent": (

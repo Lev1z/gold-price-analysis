@@ -25,8 +25,12 @@ from crawler.config import (
     BING_NEWS_QUERIES,
     BING_NEWS_RSS_URL,
     DEFAULT_DB_PATH,
+    EASTMONEY_GOLD_COLUMNS,
+    EASTMONEY_GOLD_COLUMN_API_URL,
+    EASTMONEY_GOLD_COLUMN_DEFAULT_PAGES,
     EASTMONEY_GOLD_NEWS_URL,
     REQUEST_DELAY_SECONDS,
+    REQUEST_HEADERS,
 )
 from crawler.database import cleanup_duplicate_news, get_connection, init_db, upsert_news_rows
 from crawler.http_client import get_response
@@ -196,6 +200,45 @@ def parse_eastmoney_gold_items(
     return rows
 
 
+def parse_eastmoney_column_items(
+    payload: dict[str, object],
+    column_name: str,
+) -> list[dict[str, object]]:
+    """解析东方财富栏目接口返回的新闻列表。"""
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    items = data.get("list") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+
+    rows: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = clean_text(str(item.get("title") or ""))
+        url = canonicalize_news_url(str(item.get("uniqueUrl") or item.get("url") or ""))
+        if not title or not url:
+            continue
+
+        summary = clean_text(str(item.get("summary") or ""))
+        media_name = clean_text(str(item.get("mediaName") or ""))
+        source = f"东方财富黄金频道 / {column_name}"
+        if media_name:
+            source = f"{source} / {media_name}"
+
+        rows.append(
+            {
+                "title": title,
+                "publish_time": normalize_publish_time(str(item.get("showTime") or "")),
+                "content": summary,
+                "source": source,
+                "url": url,
+            }
+        )
+
+    return rows
+
+
 def fetch_article_text(url: str, max_paragraphs: int = 12) -> str:
     """尝试进入新闻原文页抓正文。
 
@@ -242,6 +285,47 @@ def fetch_eastmoney_gold_rows() -> list[dict[str, object]]:
     return parse_eastmoney_gold_items(html_text)
 
 
+def fetch_eastmoney_column_rows(
+    pages_per_column: int = EASTMONEY_GOLD_COLUMN_DEFAULT_PAGES,
+) -> list[dict[str, object]]:
+    """抓取东方财富黄金相关栏目分页列表。"""
+
+    rows: list[dict[str, object]] = []
+    pages_per_column = max(0, pages_per_column)
+    for page_index in range(1, pages_per_column + 1):
+        for column in EASTMONEY_GOLD_COLUMNS:
+            try:
+                response = get_response(
+                    EASTMONEY_GOLD_COLUMN_API_URL,
+                    params={
+                        "client": "web",
+                        "biz": "web_news_col",
+                        "column": column["id"],
+                        "order": "1",
+                        "needInteractData": "0",
+                        "page_index": page_index,
+                        "page_size": 20,
+                        "req_trace": str(int(time.time() * 1000)),
+                        "fields": "code,showTime,title,mediaName,summary,image,url,uniqueUrl,Np_dst",
+                        "types": "1,20",
+                    },
+                    headers={**REQUEST_HEADERS, "Referer": column["referer"]},
+                )
+            except RuntimeError as exc:
+                print(
+                    "Warning: Eastmoney column failed, "
+                    f"skipped column={column['name']!r}, page={page_index}: {exc}"
+                )
+                continue
+
+            page_rows = parse_eastmoney_column_items(response.json(), column_name=column["name"])
+            if not page_rows:
+                break
+            rows.extend(page_rows)
+            time.sleep(REQUEST_DELAY_SECONDS)
+    return rows
+
+
 def deduplicate_rows(rows: Iterable[dict[str, object]]) -> list[dict[str, object]]:
     """按规范化 URL 或“标题+发布时间”去重。"""
 
@@ -269,6 +353,7 @@ def fetch_gold_news_rows(
     limit: int = 30,
     enrich_articles: bool = True,
     queries: Iterable[str] = BING_NEWS_QUERIES,
+    eastmoney_pages: int = EASTMONEY_GOLD_COLUMN_DEFAULT_PAGES,
 ) -> list[dict[str, object]]:
     """抓取黄金相关新闻，并尽量补充正文内容。"""
 
@@ -278,6 +363,9 @@ def fetch_gold_news_rows(
     except RuntimeError as exc:
         print(f"Warning: Eastmoney gold news failed, skipped: {exc}")
     time.sleep(REQUEST_DELAY_SECONDS)
+
+    if eastmoney_pages > 0:
+        rows.extend(fetch_eastmoney_column_rows(pages_per_column=eastmoney_pages))
 
     for query in queries:
         try:
@@ -317,10 +405,20 @@ def main() -> None:
         action="store_true",
         help="只保存 RSS 摘要，不进入原文页抓正文",
     )
+    parser.add_argument(
+        "--eastmoney-pages",
+        type=int,
+        default=EASTMONEY_GOLD_COLUMN_DEFAULT_PAGES,
+        help="每个东方财富黄金栏目最多抓取多少页；设为 0 表示只抓首页",
+    )
     args = parser.parse_args()
 
     init_db(DEFAULT_DB_PATH)
-    rows = fetch_gold_news_rows(limit=args.limit, enrich_articles=not args.no_enrich)
+    rows = fetch_gold_news_rows(
+        limit=args.limit,
+        enrich_articles=not args.no_enrich,
+        eastmoney_pages=args.eastmoney_pages,
+    )
     with get_connection(DEFAULT_DB_PATH) as conn:
         inserted = upsert_news_rows(conn, rows)
         deleted = cleanup_duplicate_news(conn)
