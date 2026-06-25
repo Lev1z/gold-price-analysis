@@ -26,6 +26,7 @@ analysis/output/*.png
 analysis/output/*.jpg
 analysis/output/*.jpeg
 analysis/output/*.pdf
+analysis/output/**
 
 # Streamlit and notebook/runtime noise
 .streamlit/secrets.toml

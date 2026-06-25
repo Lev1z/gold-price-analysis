@@ -1,6 +1,6 @@
 # 黄金价格智能分析平台
 
-本项目是 Python 课程设计 v1.0 版本，目标是完成一条“数据采集 -> 数据分析 -> 新闻检索 -> RAG 问答 -> Web 展示”的完整链路。当前版本已经可以爬取 COMEX 黄金日线数据和黄金相关新闻，写入 SQLite 数据库，生成分析结果，并通过 Streamlit 网页展示价格走势、新闻列表和 DeepSeek RAG 问答。
+本项目是 Python 课程设计 v1.0 版本，目标是完成一条“数据采集 -> 数据分析 -> 新闻检索 -> RAG 问答 -> Web 展示 -> 离线预测实验”的完整链路。当前版本已经可以爬取 COMEX 黄金日线数据和黄金相关新闻，写入 SQLite 数据库，生成分析结果，通过 Streamlit 网页展示价格走势、新闻列表和 DeepSeek RAG 问答，并额外提供 Naive、ARIMA、XGBoost、LSTM 四种离线预测实验用于汇报展示。
 
 > 说明：本项目仅用于课程学习和数据分析演示，不构成投资建议。
 
@@ -11,7 +11,8 @@
 - 数据分析：清洗价格数据，计算收益率、波动率、均线、月度统计和关键涨跌日。
 - RAG 问答：构建本地关键词索引，可选 Chroma 向量索引，并调用 DeepSeek API 生成回答。
 - Web 展示：使用 Streamlit 展示指标卡、Plotly 价格图、新闻时间轴、手动更新按钮和 RAG 问答区。
-- 测试覆盖：包含爬虫、数据库、分析、仪表盘和 RAG 的基础单元测试。
+- 离线预测：将历史金价按时间切分训练集和验证集，输出 Naive、ARIMA、XGBoost、LSTM 的预测对比图和误差指标。
+- 测试覆盖：包含爬虫、数据库、分析、仪表盘、新闻质量、RAG 和预测模块的基础单元测试。
 
 ## 环境准备
 
@@ -95,6 +96,25 @@ http://localhost:8501/
 python -m pytest
 ```
 
+离线预测实验：
+
+```powershell
+python -m ai.predict.run_prediction --lstm-epochs 60 --arima-validation-limit 260
+```
+
+预测实验会生成以下文件到 `analysis/output/prediction/`，用于 PPT 或课程汇报：
+
+```text
+prediction_metrics.csv
+prediction_results.csv
+prediction_comparison.png
+prediction_error.png
+prediction_metrics_bar.png
+train_validation_split.png
+```
+
+`analysis/output/` 是自动生成结果目录，默认不会提交到 GitHub。
+
 ## 目录说明
 
 ```text
@@ -103,8 +123,9 @@ FinalProject/
 │   ├── __init__.py
 │   ├── predict/
 │   │   ├── __init__.py
-│   │   ├── baseline_arima.py        # ARIMA 预测入口占位，后续用于传统时间序列基线
-│   │   └── lstm_model.py            # LSTM 预测入口占位，后续用于深度学习预测实验
+│   │   ├── baseline_arima.py        # 预测模块占位文件，保留给后续拆分 ARIMA 实现
+│   │   ├── lstm_model.py            # 预测模块占位文件，保留给后续拆分 LSTM 实现
+│   │   └── run_prediction.py        # 离线预测实验主入口：Naive/ARIMA/XGBoost/LSTM 对比
 │   └── rag/
 │       ├── __init__.py
 │       ├── build_index.py           # 从新闻表构建关键词索引，可选构建 Chroma 向量库
@@ -118,7 +139,7 @@ FinalProject/
 │   ├── statistics.py                # 日收益率、移动均线、波动率等核心指标计算
 │   ├── visualize_news.py            # 匹配关键价格波动日附近的相关新闻
 │   ├── visualize_prices.py          # Matplotlib/mplfinance 价格图表生成函数
-│   └── output/                      # 自动生成的分析结果目录，已被 .gitignore 忽略
+│   └── output/                      # 自动生成的分析与预测结果目录，已被 .gitignore 忽略
 ├── app/                             # Web 展示层
 │   ├── __init__.py
 │   ├── dashboard.py                 # Streamlit 页面背后的数据处理、新闻分类和 Plotly 图表函数
@@ -142,6 +163,8 @@ FinalProject/
 │   ├── test_crawlers.py             # 金价/新闻解析、URL 规范化和新闻去重测试
 │   ├── test_dashboard.py            # 仪表盘指标、新闻分类和图表数据测试
 │   ├── test_database.py             # 数据库建表、upsert 和重复新闻清理测试
+│   ├── test_news_quality.py         # 新闻质量过滤规则测试
+│   ├── test_prediction.py           # 训练/验证切分、预测特征和指标计算测试
 │   ├── test_rag.py                  # RAG 检索、去重、价格上下文和 prompt 测试
 │   └── test_run_analysis.py         # 分析流水线输出测试
 ├── .env.example                     # DeepSeek 环境变量示例，可提交到 GitHub
@@ -170,9 +193,20 @@ FinalProject/
 - RAG 问答：输入问题后检索新闻和价格上下文，再调用 DeepSeek 生成回答；未配置 API Key 时会返回本地检索结果。
 - 数据更新：侧边栏提供“更新数据到今天”按钮，会重新爬取数据、生成分析结果并重建 RAG 索引。
 
+## 离线预测实验
+
+预测模块位于 `ai/predict/run_prediction.py`，不接入网页主界面，主要用于课程汇报中的模型对比和实验反思。当前实现了四类模型：
+
+- Naive：朴素基线，下一交易日价格等于上一交易日收盘价。
+- ARIMA：传统时间序列模型，使用滚动方式预测验证集。
+- XGBoost：基于收盘价、收益率、成交量、均线、波动率等滞后特征进行回归。
+- LSTM：基于历史收益率窗口训练轻量循环神经网络。
+
+当前默认只对最近约 260 个交易日做 ARIMA 滚动回测，避免运行时间过长。预测输出适合放入 PPT 说明“预测任务难度”和“复杂模型不一定显著超过朴素基线”，不作为真实交易依据。
+
 ## 当前限制与后续方向
 
 - 新闻源仍是 Bing News RSS，覆盖度和事件质量有限；后续可以增加更稳定的财经新闻源。
-- 预测模块当前主要完成展示接口，ARIMA/LSTM 还处于待实现阶段。
+- 预测模块已经完成基础离线实验，但目前主要使用金价自身的历史特征；后续可以尝试更系统的特征工程、Walk-forward 验证和更严格的模型调参。
 - 新闻利多/利空分类目前基于关键词规则，后续可以接入 LLM 做更准确的事件归因。
 - 当前预测区间是简易趋势延伸，用于验证页面交互，不能作为实际预测结论。
