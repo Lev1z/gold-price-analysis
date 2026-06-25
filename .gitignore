@@ -32,6 +32,11 @@ analysis/output/**
 .streamlit/secrets.toml
 .ipynb_checkpoints/
 
+# Local course/private documents
+*.pdf
+*.doc
+*.docx
+
 # IDE and OS files
 .vscode/
 .idea/
