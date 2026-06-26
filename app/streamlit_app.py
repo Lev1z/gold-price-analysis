@@ -404,7 +404,7 @@ def main() -> None:
         show_ma60 = st.checkbox("显示 MA60", value=False)
         show_forecast = st.toggle("显示预测区间", value=False)
         forecast_days = st.slider("预测交易日数量", min_value=5, max_value=30, value=10)
-        st.caption("当前预测为简易趋势延伸，用于展示预测区间；后续可替换为 ARIMA/LSTM。")
+        st.caption("当前网页中的预测区间仅用于展示交互效果；正式预测结果请以离线模型实验为准，不构成投资建议。")
 
     metrics = compute_dashboard_metrics(prices, news)
     news_groups = classify_news_items(news, limit=None)
