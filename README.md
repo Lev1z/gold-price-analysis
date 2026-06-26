@@ -102,6 +102,12 @@ python -m pytest
 python -m ai.predict.run_prediction --lstm-epochs 60 --arima-validation-limit 260
 ```
 
+直接多预测步长实验（用于比较 1、5、20、60 个交易日后的预测误差）：
+
+```powershell
+python -m ai.predict.run_prediction --lstm-epochs 60 --arima-validation-limit 260 --multi-horizon --multi-horizon-points 120
+```
+
 预测实验会生成以下文件到 `analysis/output/prediction/`，用于 PPT 或课程汇报：
 
 ```text
@@ -111,6 +117,10 @@ prediction_comparison.png
 prediction_error.png
 prediction_metrics_bar.png
 train_validation_split.png
+multi_horizon_predictions.csv
+multi_horizon_metrics.csv
+multi_horizon_metrics.png
+multi_horizon_example.png
 ```
 
 `analysis/output/` 是自动生成结果目录，默认不会提交到 GitHub。
@@ -197,12 +207,12 @@ FinalProject/
 
 预测模块位于 `ai/predict/run_prediction.py`，不接入网页主界面，主要用于课程汇报中的模型对比和实验反思。当前实现了四类模型：
 
-- Naive：朴素基线，下一交易日价格等于上一交易日收盘价。
-- ARIMA：传统时间序列模型，使用滚动方式预测验证集。
-- XGBoost：基于收盘价、收益率、成交量、均线、波动率等滞后特征进行回归。
-- LSTM：基于历史收益率窗口训练轻量循环神经网络。
+- Naive：朴素基线，未来价格等于预测起点收盘价。
+- ARIMA：传统时间序列模型，可直接预测指定交易日步长后的价格。
+- XGBoost：基于收盘价、收益率、成交量、均线、波动率等滞后特征，分别训练不同预测步长的累计收益率。
+- LSTM：基于历史收益率窗口，分别训练不同预测步长的累计收益率。
 
-当前默认只对最近约 260 个交易日做 ARIMA 滚动回测，避免运行时间过长。预测输出适合放入 PPT 说明“预测任务难度”和“复杂模型不一定显著超过朴素基线”，不作为真实交易依据。
+默认的一步滚动实验只对最近约 260 个交易日做 ARIMA 回测，避免运行时间过长。可选的多预测步长实验会在 1、5、20、60 个交易日上分别进行直接历史回测；四个步长共享同一组验证预测起点，避免不同时间段干扰横向比较。它不是在某一天一次性递归预测未来 60 天。`multi_horizon_metrics.png` 适合展示预测周期变长时误差的变化，`multi_horizon_example.png` 展示固定预测起点下各模型对不同未来终点的预测。预测输出用于说明模型边界和比较实验，不作为真实交易依据。
 
 ## 当前限制与后续方向
 

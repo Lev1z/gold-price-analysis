@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import math
 import random
+import warnings
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +30,7 @@ from crawler.config import DEFAULT_DB_PATH, PROJECT_ROOT
 OUTPUT_DIR = PROJECT_ROOT / "analysis" / "output" / "prediction"
 DEFAULT_LAGS = (1, 2, 3, 5, 10, 20)
 DEFAULT_ROLLING_WINDOWS = (5, 10, 20, 60)
+DEFAULT_MULTI_HORIZONS = (1, 5, 20, 60)
 
 
 def set_random_seed(seed: int = 42) -> None:
@@ -120,6 +122,107 @@ def build_supervised_features(
     return features.dropna().reset_index(drop=True)
 
 
+def build_direct_horizon_features(
+    data: pd.DataFrame,
+    horizon: int,
+    lags: Iterable[int] = DEFAULT_LAGS,
+    rolling_windows: Iterable[int] = DEFAULT_ROLLING_WINDOWS,
+) -> pd.DataFrame:
+    """构造直接预测第 ``horizon`` 个交易日后价格的特征。
+
+    每一行代表一个预测起点。特征只使用起点及其之前的数据，
+    ``target_close`` 是起点之后第 ``horizon`` 个交易日的真实收盘价。
+    """
+
+    if horizon <= 0:
+        raise ValueError("horizon 必须是正整数")
+
+    working = data.copy()
+    working["date"] = pd.to_datetime(working["date"], errors="coerce")
+    numeric_columns = ["open", "high", "low", "close", "volume"]
+    for column in numeric_columns:
+        if column in working.columns:
+            working[column] = pd.to_numeric(working[column], errors="coerce")
+    working = working.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+
+    features = pd.DataFrame(
+        {
+            "origin_date": working["date"],
+            "target_date": working["date"].shift(-horizon),
+            "origin_close": working["close"],
+            "target_close": working["close"].shift(-horizon),
+        }
+    )
+    features["target_return"] = features["target_close"] / features["origin_close"] - 1
+
+    for lag in lags:
+        features[f"close_lag_{lag}"] = working["close"].shift(lag)
+        features[f"return_lag_{lag}"] = working["close"].pct_change().shift(lag)
+        if "volume" in working.columns:
+            features[f"volume_lag_{lag}"] = working["volume"].shift(lag)
+
+    for window in rolling_windows:
+        features[f"ma_{window}_lag_1"] = working["close"].rolling(window).mean().shift(1)
+        features[f"volatility_{window}_lag_1"] = (
+            working["close"].pct_change().rolling(window).std().shift(1)
+        )
+        features[f"range_{window}_lag_1"] = (
+            (working["high"] - working["low"]).rolling(window).mean().shift(1)
+            if {"high", "low"}.issubset(working.columns)
+            else np.nan
+        )
+
+    return features.dropna().reset_index(drop=True)
+
+
+def select_direct_evaluation_windows(
+    features: pd.DataFrame,
+    evaluation_points: int,
+    validation_origins: pd.DatetimeIndex | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """按预测起点划分直接预测训练集与验证集，避免标签跨界。"""
+
+    if evaluation_points <= 0:
+        raise ValueError("evaluation_points 必须是正整数")
+    if len(features) <= evaluation_points:
+        raise ValueError("特征样本不足，无法划分训练集和验证集")
+
+    ordered = features.sort_values("origin_date").reset_index(drop=True)
+    if validation_origins is None:
+        validation = ordered.tail(evaluation_points).reset_index(drop=True)
+    else:
+        validation = ordered[
+            ordered["origin_date"].isin(pd.to_datetime(validation_origins))
+        ].reset_index(drop=True)
+        if len(validation) != evaluation_points:
+            raise ValueError("指定的共同验证预测起点未被当前步长完整覆盖")
+    validation_start = validation["origin_date"].iloc[0]
+    train = ordered[
+        (ordered["origin_date"] < validation_start)
+        & (ordered["target_date"] < validation_start)
+    ].reset_index(drop=True)
+    if train.empty:
+        raise ValueError("训练样本不足：预测标签与验证起点没有可用间隔")
+    return train, validation
+
+
+def select_common_direct_evaluation_origins(
+    features_by_horizon: dict[int, pd.DataFrame],
+    evaluation_points: int,
+) -> pd.DatetimeIndex:
+    """选择所有预测步长共同拥有的最后一组历史预测起点。"""
+
+    if evaluation_points <= 0:
+        raise ValueError("evaluation_points 必须是正整数")
+    origin_sets = [set(pd.to_datetime(features["origin_date"])) for features in features_by_horizon.values()]
+    if not origin_sets:
+        raise ValueError("没有可用于选择共同预测起点的特征数据")
+    common_origins = sorted(set.intersection(*origin_sets))
+    if len(common_origins) < evaluation_points:
+        raise ValueError("共同预测起点不足，无法完成多预测步长回测")
+    return pd.DatetimeIndex(common_origins[-evaluation_points:])
+
+
 def calculate_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
     """计算预测误差指标。"""
 
@@ -140,6 +243,263 @@ def naive_forecast(train: pd.DataFrame, validation: pd.DataFrame) -> np.ndarray:
     predictions = combined_close.shift(1).iloc[len(train) :].to_numpy(dtype=float)
     predictions[0] = float(train["close"].iloc[-1])
     return predictions
+
+
+def naive_direct_forecast(validation: pd.DataFrame) -> np.ndarray:
+    """直接预测基线：未来任意步长价格等于预测起点收盘价。"""
+
+    return validation["origin_close"].to_numpy(dtype=float)
+
+
+def _direct_feature_columns(data: pd.DataFrame) -> list[str]:
+    metadata_columns = {
+        "origin_date",
+        "target_date",
+        "origin_close",
+        "target_close",
+        "target_return",
+    }
+    return [column for column in data.columns if column not in metadata_columns]
+
+
+def arima_direct_forecast(
+    prices: pd.DataFrame,
+    validation: pd.DataFrame,
+    horizon: int,
+    order: tuple[int, int, int] = (5, 1, 0),
+) -> np.ndarray:
+    """在每个预测起点直接预测第 ``horizon`` 个交易日后的价格。"""
+
+    try:
+        from statsmodels.tsa.arima.model import ARIMA
+    except ImportError as exc:
+        raise RuntimeError("缺少 statsmodels，请先安装 statsmodels") from exc
+
+    ordered_prices = prices.sort_values("date").reset_index(drop=True)
+    origins = pd.to_datetime(validation["origin_date"]).sort_values().to_list()
+    first_origin = origins[0]
+    history = ordered_prices.loc[
+        ordered_prices["date"] <= first_origin, "close"
+    ].to_numpy(dtype=float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fitted = ARIMA(history, order=order).fit()
+
+    predictions: list[float] = []
+    previous_origin = first_origin
+    for index, origin_date in enumerate(origins):
+        if index:
+            observed = ordered_prices.loc[
+                (ordered_prices["date"] > previous_origin)
+                & (ordered_prices["date"] <= origin_date),
+                "close",
+            ].to_numpy(dtype=float)
+            if observed.size:
+                fitted = fitted.append(observed, refit=False)
+        predictions.append(float(np.asarray(fitted.forecast(steps=horizon))[-1]))
+        previous_origin = origin_date
+    return np.array(predictions, dtype=float)
+
+
+def xgboost_direct_forecast(train: pd.DataFrame, validation: pd.DataFrame) -> np.ndarray:
+    """按单个预测步长训练 XGBoost，输出未来目标日收盘价。"""
+
+    try:
+        from xgboost import XGBRegressor
+    except ImportError as exc:
+        raise RuntimeError("缺少 xgboost，请先安装 xgboost") from exc
+
+    feature_columns = _direct_feature_columns(train)
+    model = XGBRegressor(
+        n_estimators=300,
+        max_depth=3,
+        learning_rate=0.03,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        objective="reg:squarederror",
+        random_state=42,
+        n_jobs=2,
+    )
+    model.fit(train[feature_columns], train["target_return"])
+    predicted_returns = model.predict(validation[feature_columns])
+    return validation["origin_close"].to_numpy(dtype=float) * (1 + predicted_returns)
+
+
+def _build_direct_lstm_samples(
+    prices: pd.DataFrame,
+    horizon: int,
+    lookback: int,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """构造以预测起点结束的收益率窗口及其未来目标。"""
+
+    ordered = prices.sort_values("date").reset_index(drop=True)
+    closes = ordered["close"].to_numpy(dtype=float)
+    returns = pd.Series(closes).pct_change().fillna(0.0).to_numpy(dtype=float)
+    rows: list[dict[str, object]] = []
+    windows: list[np.ndarray] = []
+    for origin_index in range(lookback, len(ordered) - horizon):
+        target_index = origin_index + horizon
+        origin_close = closes[origin_index]
+        target_close = closes[target_index]
+        rows.append(
+            {
+                "origin_date": ordered["date"].iloc[origin_index],
+                "target_date": ordered["date"].iloc[target_index],
+                "origin_close": origin_close,
+                "target_close": target_close,
+                "target_return": target_close / origin_close - 1,
+            }
+        )
+        windows.append(returns[origin_index - lookback + 1 : origin_index + 1])
+    return pd.DataFrame(rows), np.array(windows, dtype=np.float32)
+
+
+def lstm_direct_forecast(
+    prices: pd.DataFrame,
+    train: pd.DataFrame,
+    validation: pd.DataFrame,
+    horizon: int,
+    lookback: int = 60,
+    epochs: int = 60,
+    batch_size: int = 32,
+) -> np.ndarray:
+    """按单个预测步长训练 LSTM，输出未来目标日收盘价。"""
+
+    try:
+        import torch
+        from torch import nn
+        from torch.utils.data import DataLoader, TensorDataset
+    except ImportError as exc:
+        raise RuntimeError("缺少 torch，请先安装 PyTorch") from exc
+
+    set_random_seed(42)
+    sample_meta, sample_windows = _build_direct_lstm_samples(prices, horizon, lookback)
+    train_dates = set(pd.to_datetime(train["origin_date"]))
+    validation_dates = set(pd.to_datetime(validation["origin_date"]))
+    train_mask = sample_meta["origin_date"].isin(train_dates).to_numpy()
+    validation_mask = sample_meta["origin_date"].isin(validation_dates).to_numpy()
+
+    if not train_mask.any() or not validation_mask.any():
+        raise ValueError("LSTM 样本不足，无法对齐直接预测训练集和验证集")
+
+    x_train_raw = sample_windows[train_mask]
+    x_validation_raw = sample_windows[validation_mask]
+    y_train_raw = sample_meta.loc[train_mask, "target_return"].to_numpy(dtype=np.float32)
+    mean = float(x_train_raw.mean())
+    std = float(x_train_raw.std()) or 1.0
+    target_mean = float(y_train_raw.mean())
+    target_std = float(y_train_raw.std()) or 1.0
+
+    x_train = torch.tensor((x_train_raw - mean) / std).unsqueeze(-1)
+    y_train = torch.tensor((y_train_raw - target_mean) / target_std).unsqueeze(-1)
+    x_validation = torch.tensor((x_validation_raw - mean) / std).unsqueeze(-1)
+
+    class GoldDirectLSTM(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lstm = nn.LSTM(input_size=1, hidden_size=64, num_layers=1, batch_first=True)
+            self.head = nn.Linear(64, 1)
+
+        def forward(self, x):
+            output, _ = self.lstm(x)
+            return self.head(output[:, -1, :])
+
+    model = GoldDirectLSTM()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    loss_fn = nn.MSELoss()
+    loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=False)
+
+    model.train()
+    for _ in range(epochs):
+        for batch_x, batch_y in loader:
+            optimizer.zero_grad()
+            loss = loss_fn(model(batch_x), batch_y)
+            loss.backward()
+            optimizer.step()
+
+    model.eval()
+    with torch.no_grad():
+        predicted_returns = model(x_validation).squeeze(-1).numpy() * target_std + target_mean
+
+    validation_meta = sample_meta.loc[validation_mask].sort_values("origin_date")
+    predicted_by_date = pd.Series(
+        predicted_returns,
+        index=pd.to_datetime(validation_meta["origin_date"]),
+    )
+    ordered_returns = predicted_by_date.reindex(pd.to_datetime(validation["origin_date"])).to_numpy(dtype=float)
+    return validation["origin_close"].to_numpy(dtype=float) * (1 + ordered_returns)
+
+
+def run_multi_horizon_experiment(
+    db_path: str | Path = DEFAULT_DB_PATH,
+    horizons: tuple[int, ...] = DEFAULT_MULTI_HORIZONS,
+    evaluation_points: int = 120,
+    lstm_epochs: int = 60,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """运行 Naive、ARIMA、XGBoost、LSTM 的直接多预测步长历史回测。"""
+
+    set_random_seed(42)
+    validate_multi_horizon_config(horizons, evaluation_points)
+    prices = load_prediction_data(db_path)
+    features_by_horizon = {
+        horizon: build_direct_horizon_features(prices, horizon=horizon)
+        for horizon in horizons
+    }
+    common_validation_origins = select_common_direct_evaluation_origins(
+        features_by_horizon,
+        evaluation_points=evaluation_points,
+    )
+    prediction_frames: list[pd.DataFrame] = []
+    metrics_rows: list[dict[str, object]] = []
+
+    for horizon in horizons:
+        train, validation = select_direct_evaluation_windows(
+            features_by_horizon[horizon],
+            evaluation_points,
+            validation_origins=common_validation_origins,
+        )
+        predictions = {
+            "Naive": naive_direct_forecast(validation),
+            "ARIMA": arima_direct_forecast(prices, validation, horizon=horizon),
+            "XGBoost": xgboost_direct_forecast(train, validation),
+            "LSTM": lstm_direct_forecast(
+                prices,
+                train,
+                validation,
+                horizon=horizon,
+                epochs=lstm_epochs,
+            ),
+        }
+
+        for model_name, predicted_close in predictions.items():
+            actual_close = validation["target_close"].to_numpy(dtype=float)
+            metrics_rows.append(
+                {
+                    "model": model_name,
+                    "horizon": horizon,
+                    **calculate_metrics(actual_close, predicted_close),
+                    "train_start": train["origin_date"].iloc[0].strftime("%Y-%m-%d"),
+                    "train_end": train["target_date"].iloc[-1].strftime("%Y-%m-%d"),
+                    "validation_origin_start": validation["origin_date"].iloc[0].strftime("%Y-%m-%d"),
+                    "validation_origin_end": validation["origin_date"].iloc[-1].strftime("%Y-%m-%d"),
+                    "validation_samples": len(validation),
+                }
+            )
+            prediction_frames.append(
+                pd.DataFrame(
+                    {
+                        "model": model_name,
+                        "horizon": horizon,
+                        "origin_date": validation["origin_date"].to_numpy(),
+                        "target_date": validation["target_date"].to_numpy(),
+                        "origin_close": validation["origin_close"].to_numpy(dtype=float),
+                        "actual_close": actual_close,
+                        "predicted_close": predicted_close,
+                    }
+                )
+            )
+
+    return pd.concat(prediction_frames, ignore_index=True), pd.DataFrame(metrics_rows)
 
 
 def arima_forecast(train: pd.DataFrame, validation: pd.DataFrame, order=(5, 1, 0)) -> np.ndarray:
@@ -360,6 +720,124 @@ def plot_metrics_bar(metrics: pd.DataFrame, output_path: Path) -> None:
     plt.close(figure)
 
 
+def plot_multi_horizon_metrics(metrics: pd.DataFrame, output_path: Path) -> None:
+    """绘制多预测步长下的 MAE 与 MAPE 分组柱状图。"""
+
+    horizons = sorted(metrics["horizon"].unique())
+    models = [model for model in ["Naive", "ARIMA", "XGBoost", "LSTM"] if model in set(metrics["model"])]
+    colors = {"Naive": "#64748b", "ARIMA": "#2563eb", "XGBoost": "#059669", "LSTM": "#dc2626"}
+    x = np.arange(len(horizons))
+    width = 0.78 / len(models)
+    figure, axes = plt.subplots(1, 2, figsize=(14, 5.2))
+
+    for axis, column, label in zip(axes, ["MAE", "MAPE"], ["MAE", "MAPE (%)"]):
+        for index, model in enumerate(models):
+            values = (
+                metrics[metrics["model"] == model]
+                .set_index("horizon")
+                .reindex(horizons)[column]
+                .to_numpy(dtype=float)
+            )
+            if column == "MAPE":
+                values = values * 100
+            positions = x - 0.39 + width / 2 + index * width
+            axis.bar(positions, values, width=width, label=model, color=colors[model])
+        axis.set_title(label)
+        axis.set_xlabel("Forecast Horizon (trading days)")
+        axis.set_xticks(x, [str(horizon) for horizon in horizons])
+        axis.grid(axis="y", alpha=0.25)
+
+    axes[0].set_ylabel("Price Error")
+    axes[1].set_ylabel("Percentage Error")
+    axes[1].legend(loc="upper left")
+    figure.suptitle("Direct Multi-Horizon Forecast Error")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def select_common_example_origin(
+    predictions: pd.DataFrame,
+    horizons: tuple[int, ...] = DEFAULT_MULTI_HORIZONS,
+) -> pd.Timestamp:
+    """选择同时拥有全部模型和预测步长的最近预测起点。"""
+
+    expected_models = set(predictions["model"])
+    required_horizons = set(horizons)
+    eligible: list[pd.Timestamp] = []
+    for origin_date, group in predictions.groupby("origin_date"):
+        if set(group["horizon"]) != required_horizons:
+            continue
+        if all(
+            set(group.loc[group["horizon"] == horizon, "model"]) == expected_models
+            for horizon in required_horizons
+        ):
+            eligible.append(pd.Timestamp(origin_date))
+    if not eligible:
+        raise ValueError("没有同时覆盖全部预测步长和模型的示例预测起点")
+    return max(eligible)
+
+
+def validate_multi_horizon_config(
+    horizons: tuple[int, ...],
+    evaluation_points: int,
+) -> None:
+    """确保各预测步长的验证窗口存在共同的示例预测起点。"""
+
+    if not horizons or any(horizon <= 0 for horizon in horizons):
+        raise ValueError("horizons 必须包含正整数预测步长")
+    if evaluation_points <= 0:
+        raise ValueError("evaluation_points 必须是正整数")
+
+
+def plot_multi_horizon_example(
+    prices: pd.DataFrame,
+    predictions: pd.DataFrame,
+    example_origin: pd.Timestamp,
+    output_path: Path,
+) -> None:
+    """绘制固定起点的未来 60 个交易日真实路径及各模型预测终点。"""
+
+    example_rows = predictions[predictions["origin_date"] == example_origin].copy()
+    max_horizon = int(example_rows["horizon"].max())
+    ordered_prices = prices.sort_values("date").reset_index(drop=True)
+    origin_index = ordered_prices.index[ordered_prices["date"] == example_origin]
+    if origin_index.empty:
+        raise ValueError("示例预测起点不在价格数据中")
+    path = ordered_prices.iloc[origin_index[0] : origin_index[0] + max_horizon + 1]
+
+    colors = {"Naive": "#64748b", "ARIMA": "#2563eb", "XGBoost": "#059669", "LSTM": "#dc2626"}
+    figure, axis = plt.subplots(figsize=(13, 5.6))
+    axis.plot(path["date"], path["close"], color="#111827", linewidth=2.2, label="Actual close")
+    axis.scatter(
+        [example_origin],
+        [path["close"].iloc[0]],
+        color="#111827",
+        marker="o",
+        s=55,
+        zorder=5,
+        label="Forecast origin",
+    )
+    for model, group in example_rows.groupby("model"):
+        axis.scatter(
+            group["target_date"],
+            group["predicted_close"],
+            color=colors.get(model, "#0f172a"),
+            marker="X",
+            s=70,
+            zorder=6,
+            label=f"{model} direct forecast",
+        )
+    axis.set_title("Direct Forecast Endpoints From One Origin")
+    axis.set_xlabel("Target Date")
+    axis.set_ylabel("Close Price")
+    axis.grid(alpha=0.25)
+    axis.legend(ncol=2, fontsize=9)
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
 def plot_train_validation_split(
     prices: pd.DataFrame,
     train_end_date: pd.Timestamp,
@@ -393,6 +871,8 @@ def run_prediction_experiment(
     validation_ratio: float = 0.2,
     lstm_epochs: int = 60,
     arima_validation_limit: int | None = 260,
+    run_multi_horizon: bool = False,
+    multi_horizon_points: int = 120,
 ) -> dict[str, Path]:
     """运行完整预测实验，并返回输出文件路径。"""
 
@@ -465,7 +945,7 @@ def run_prediction_experiment(
         output_path=split_path,
     )
 
-    return {
+    outputs = {
         "results": results_path,
         "metrics": metrics_path,
         "comparison": comparison_path,
@@ -473,6 +953,30 @@ def run_prediction_experiment(
         "metrics_bar": metrics_bar_path,
         "split": split_path,
     }
+    if run_multi_horizon:
+        multi_predictions, multi_metrics = run_multi_horizon_experiment(
+            db_path=db_path,
+            evaluation_points=multi_horizon_points,
+            lstm_epochs=lstm_epochs,
+        )
+        multi_predictions_path = OUTPUT_DIR / "multi_horizon_predictions.csv"
+        multi_metrics_path = OUTPUT_DIR / "multi_horizon_metrics.csv"
+        multi_metrics_plot_path = OUTPUT_DIR / "multi_horizon_metrics.png"
+        multi_example_path = OUTPUT_DIR / "multi_horizon_example.png"
+        multi_predictions.to_csv(multi_predictions_path, index=False, encoding="utf-8-sig")
+        multi_metrics.to_csv(multi_metrics_path, index=False, encoding="utf-8-sig")
+        plot_multi_horizon_metrics(multi_metrics, multi_metrics_plot_path)
+        example_origin = select_common_example_origin(multi_predictions)
+        plot_multi_horizon_example(prices, multi_predictions, example_origin, multi_example_path)
+        outputs.update(
+            {
+                "multi_horizon_predictions": multi_predictions_path,
+                "multi_horizon_metrics": multi_metrics_path,
+                "multi_horizon_metrics_plot": multi_metrics_plot_path,
+                "multi_horizon_example": multi_example_path,
+            }
+        )
+    return outputs
 
 
 def main() -> None:
@@ -486,6 +990,17 @@ def main() -> None:
         default=260,
         help="ARIMA 默认只回测验证集最后 N 个交易日；设为 0 表示使用完整验证集",
     )
+    parser.add_argument(
+        "--multi-horizon",
+        action="store_true",
+        help="额外运行 1、5、20、60 个交易日的直接多步长预测回测",
+    )
+    parser.add_argument(
+        "--multi-horizon-points",
+        type=int,
+        default=120,
+        help="多预测步长回测的每个步长验证预测起点数量",
+    )
     args = parser.parse_args()
 
     outputs = run_prediction_experiment(
@@ -493,6 +1008,8 @@ def main() -> None:
         validation_ratio=args.validation_ratio,
         lstm_epochs=args.lstm_epochs,
         arima_validation_limit=args.arima_validation_limit or None,
+        run_multi_horizon=args.multi_horizon,
+        multi_horizon_points=args.multi_horizon_points,
     )
     print("Prediction experiment finished.")
     for name, path in outputs.items():
