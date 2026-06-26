@@ -102,7 +102,7 @@ python -m pytest
 python -m ai.predict.run_prediction --lstm-epochs 60 --arima-validation-limit 260
 ```
 
-直接多预测步长实验（用于比较 1、5、20、60 个交易日后的预测误差）：
+直接多预测步长实验（用于比较 1、3、5、20、60 个交易日后的预测误差）：
 
 ```powershell
 python -m ai.predict.run_prediction --lstm-epochs 60 --arima-validation-limit 260 --multi-horizon --multi-horizon-points 120
@@ -121,6 +121,7 @@ multi_horizon_predictions.csv
 multi_horizon_metrics.csv
 multi_horizon_metrics.png
 multi_horizon_example.png
+short_horizon_trajectories.png
 ```
 
 `analysis/output/` 是自动生成结果目录，默认不会提交到 GitHub。
@@ -212,7 +213,7 @@ FinalProject/
 - XGBoost：基于收盘价、收益率、成交量、均线、波动率等滞后特征，分别训练不同预测步长的累计收益率。
 - LSTM：基于历史收益率窗口，分别训练不同预测步长的累计收益率。
 
-默认的一步滚动实验只对最近约 260 个交易日做 ARIMA 回测，避免运行时间过长。可选的多预测步长实验会在 1、5、20、60 个交易日上分别进行直接历史回测；四个步长共享同一组验证预测起点，避免不同时间段干扰横向比较。它不是在某一天一次性递归预测未来 60 天。`multi_horizon_metrics.png` 适合展示预测周期变长时误差的变化，`multi_horizon_example.png` 展示固定预测起点下各模型对不同未来终点的预测。预测输出用于说明模型边界和比较实验，不作为真实交易依据。
+默认的一步滚动实验只对最近约 260 个交易日做 ARIMA 回测，避免运行时间过长。可选的多预测步长实验会在 1、3、5、20、60 个交易日上分别进行直接历史回测；所有步长共享同一组验证预测起点，避免不同时间段干扰横向比较。它不是在某一天一次性递归预测未来 60 天。`multi_horizon_metrics.png` 适合展示预测周期变长时误差的变化，`multi_horizon_example.png` 展示固定预测起点下各模型对不同未来终点的预测，`short_horizon_trajectories.png` 以 2×2 分面展示四个模型在 t+1、t+3、t+5 上的滚动预测走势。预测输出用于说明模型边界和比较实验，不作为真实交易依据。
 
 ## 当前限制与后续方向
 

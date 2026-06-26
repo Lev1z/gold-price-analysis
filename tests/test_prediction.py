@@ -13,6 +13,7 @@ from ai.predict.run_prediction import (
     select_common_example_origin,
     select_common_direct_evaluation_origins,
     select_direct_evaluation_windows,
+    select_short_horizon_predictions,
     split_train_validation,
     validate_multi_horizon_config,
 )
@@ -221,3 +222,18 @@ def test_arima_direct_forecast_fits_once_then_appends_observed_history(monkeypat
     assert len(predicted) == 2
     assert FakeARIMA.fit_calls == 1
     assert FakeResult.append_calls == 1
+
+
+def test_select_short_horizon_predictions_keeps_only_requested_horizons():
+    predictions = pd.DataFrame(
+        {
+            "model": ["Naive"] * 5,
+            "horizon": [1, 3, 5, 20, 60],
+            "target_date": pd.date_range("2026-01-01", periods=5),
+            "predicted_close": [100, 101, 102, 103, 104],
+        }
+    )
+
+    short = select_short_horizon_predictions(predictions, horizons=(1, 3, 5))
+
+    assert list(short["horizon"]) == [1, 3, 5]

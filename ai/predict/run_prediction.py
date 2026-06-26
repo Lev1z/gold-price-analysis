@@ -30,7 +30,8 @@ from crawler.config import DEFAULT_DB_PATH, PROJECT_ROOT
 OUTPUT_DIR = PROJECT_ROOT / "analysis" / "output" / "prediction"
 DEFAULT_LAGS = (1, 2, 3, 5, 10, 20)
 DEFAULT_ROLLING_WINDOWS = (5, 10, 20, 60)
-DEFAULT_MULTI_HORIZONS = (1, 5, 20, 60)
+DEFAULT_MULTI_HORIZONS = (1, 3, 5, 20, 60)
+DEFAULT_SHORT_HORIZONS = (1, 3, 5)
 
 
 def set_random_seed(seed: int = 42) -> None:
@@ -778,6 +779,15 @@ def select_common_example_origin(
     return max(eligible)
 
 
+def select_short_horizon_predictions(
+    predictions: pd.DataFrame,
+    horizons: tuple[int, ...] = DEFAULT_SHORT_HORIZONS,
+) -> pd.DataFrame:
+    """筛选用于短期走势展示的直接预测记录。"""
+
+    return predictions[predictions["horizon"].isin(horizons)].copy()
+
+
 def validate_multi_horizon_config(
     horizons: tuple[int, ...],
     evaluation_points: int,
@@ -834,6 +844,74 @@ def plot_multi_horizon_example(
     axis.grid(alpha=0.25)
     axis.legend(ncol=2, fontsize=9)
     figure.tight_layout()
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def plot_short_horizon_trajectories(
+    prices: pd.DataFrame,
+    predictions: pd.DataFrame,
+    output_path: Path,
+    horizons: tuple[int, ...] = DEFAULT_SHORT_HORIZONS,
+    display_points: int = 60,
+) -> None:
+    """按模型分面绘制 t+1、t+3、t+5 直接预测与真实价格走势。"""
+
+    short_predictions = select_short_horizon_predictions(predictions, horizons=horizons)
+    if short_predictions.empty:
+        raise ValueError("没有可用于短期走势展示的预测记录")
+
+    target_dates = sorted(pd.to_datetime(short_predictions["target_date"]).unique())
+    display_start = target_dates[max(0, len(target_dates) - display_points)]
+    short_predictions = short_predictions[
+        pd.to_datetime(short_predictions["target_date"]) >= display_start
+    ].copy()
+    ordered_prices = prices.sort_values("date").reset_index(drop=True)
+    actual = ordered_prices[
+        (ordered_prices["date"] >= display_start)
+        & (ordered_prices["date"] <= pd.to_datetime(short_predictions["target_date"]).max())
+    ]
+
+    colors = {1: "#2563eb", 3: "#059669", 5: "#d97706"}
+    models = [model for model in ["Naive", "ARIMA", "XGBoost", "LSTM"] if model in set(short_predictions["model"])]
+    figure, axes = plt.subplots(2, 2, figsize=(14, 8.5), sharex=True, sharey=True)
+    for axis, model in zip(axes.flat, models):
+        axis.plot(
+            actual["date"],
+            actual["close"],
+            color="#111827",
+            linewidth=2.0,
+            label="Actual",
+        )
+        model_predictions = short_predictions[short_predictions["model"] == model]
+        for horizon in horizons:
+            series = model_predictions[model_predictions["horizon"] == horizon].sort_values("target_date")
+            axis.plot(
+                series["target_date"],
+                series["predicted_close"],
+                color=colors[horizon],
+                linewidth=1.5,
+                alpha=0.9,
+                label=f"t+{horizon}",
+            )
+        axis.set_title(model)
+        axis.grid(alpha=0.25)
+
+    for axis in axes[:, 0]:
+        axis.set_ylabel("Close Price")
+    for axis in axes[-1, :]:
+        axis.set_xlabel("Target Date")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    figure.suptitle("Short-Horizon Direct Forecast Trajectories", y=0.99)
+    figure.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.955),
+        ncol=4,
+        frameon=False,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.88))
     figure.savefig(output_path, dpi=180)
     plt.close(figure)
 
@@ -963,17 +1041,20 @@ def run_prediction_experiment(
         multi_metrics_path = OUTPUT_DIR / "multi_horizon_metrics.csv"
         multi_metrics_plot_path = OUTPUT_DIR / "multi_horizon_metrics.png"
         multi_example_path = OUTPUT_DIR / "multi_horizon_example.png"
+        short_horizon_trajectory_path = OUTPUT_DIR / "short_horizon_trajectories.png"
         multi_predictions.to_csv(multi_predictions_path, index=False, encoding="utf-8-sig")
         multi_metrics.to_csv(multi_metrics_path, index=False, encoding="utf-8-sig")
         plot_multi_horizon_metrics(multi_metrics, multi_metrics_plot_path)
         example_origin = select_common_example_origin(multi_predictions)
         plot_multi_horizon_example(prices, multi_predictions, example_origin, multi_example_path)
+        plot_short_horizon_trajectories(prices, multi_predictions, short_horizon_trajectory_path)
         outputs.update(
             {
                 "multi_horizon_predictions": multi_predictions_path,
                 "multi_horizon_metrics": multi_metrics_path,
                 "multi_horizon_metrics_plot": multi_metrics_plot_path,
                 "multi_horizon_example": multi_example_path,
+                "short_horizon_trajectories": short_horizon_trajectory_path,
             }
         )
     return outputs
