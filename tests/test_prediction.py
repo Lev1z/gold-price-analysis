@@ -13,6 +13,7 @@ from ai.predict.run_prediction import (
     select_common_example_origin,
     select_common_direct_evaluation_origins,
     select_direct_evaluation_windows,
+    select_short_horizon_metrics,
     select_short_horizon_predictions,
     split_train_validation,
     validate_multi_horizon_config,
@@ -235,5 +236,19 @@ def test_select_short_horizon_predictions_keeps_only_requested_horizons():
     )
 
     short = select_short_horizon_predictions(predictions, horizons=(1, 3, 5))
+
+    assert list(short["horizon"]) == [1, 3, 5]
+
+
+def test_select_short_horizon_metrics_keeps_only_requested_horizons():
+    metrics = pd.DataFrame(
+        {
+            "model": ["Naive"] * 5,
+            "horizon": [1, 3, 5, 20, 60],
+            "MAPE": [0.01, 0.02, 0.03, 0.04, 0.05],
+        }
+    )
+
+    short = select_short_horizon_metrics(metrics, horizons=(1, 3, 5))
 
     assert list(short["horizon"]) == [1, 3, 5]

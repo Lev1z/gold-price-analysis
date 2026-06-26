@@ -788,6 +788,15 @@ def select_short_horizon_predictions(
     return predictions[predictions["horizon"].isin(horizons)].copy()
 
 
+def select_short_horizon_metrics(
+    metrics: pd.DataFrame,
+    horizons: tuple[int, ...] = DEFAULT_SHORT_HORIZONS,
+) -> pd.DataFrame:
+    """筛选用于短期 MAPE 对比图的汇总指标。"""
+
+    return metrics[metrics["horizon"].isin(horizons)].copy()
+
+
 def validate_multi_horizon_config(
     horizons: tuple[int, ...],
     evaluation_points: int,
@@ -912,6 +921,46 @@ def plot_short_horizon_trajectories(
         frameon=False,
     )
     figure.tight_layout(rect=(0, 0, 1, 0.88))
+    figure.savefig(output_path, dpi=180)
+    plt.close(figure)
+
+
+def plot_short_horizon_mape(
+    metrics: pd.DataFrame,
+    output_path: Path,
+    horizons: tuple[int, ...] = DEFAULT_SHORT_HORIZONS,
+) -> None:
+    """绘制 t+1、t+3、t+5 的模型 MAPE 折线对比。"""
+
+    short_metrics = select_short_horizon_metrics(metrics, horizons=horizons)
+    if short_metrics.empty:
+        raise ValueError("没有可用于短期 MAPE 图的指标数据")
+
+    colors = {"Naive": "#64748b", "ARIMA": "#2563eb", "XGBoost": "#059669", "LSTM": "#dc2626"}
+    models = [model for model in ["Naive", "ARIMA", "XGBoost", "LSTM"] if model in set(short_metrics["model"])]
+    figure, axis = plt.subplots(figsize=(8.2, 4.8))
+    for model in models:
+        model_metrics = (
+            short_metrics[short_metrics["model"] == model]
+            .set_index("horizon")
+            .reindex(horizons)
+        )
+        axis.plot(
+            horizons,
+            model_metrics["MAPE"].to_numpy(dtype=float) * 100,
+            marker="o",
+            markersize=6,
+            linewidth=2.0,
+            color=colors[model],
+            label=model,
+        )
+    axis.set_title("Short-Horizon Forecast Error (MAPE)")
+    axis.set_xlabel("Forecast Horizon (trading days)")
+    axis.set_ylabel("MAPE (%)")
+    axis.set_xticks(horizons, [f"t+{horizon}" for horizon in horizons])
+    axis.grid(alpha=0.25)
+    axis.legend(ncol=2, frameon=False)
+    figure.tight_layout()
     figure.savefig(output_path, dpi=180)
     plt.close(figure)
 
@@ -1042,12 +1091,14 @@ def run_prediction_experiment(
         multi_metrics_plot_path = OUTPUT_DIR / "multi_horizon_metrics.png"
         multi_example_path = OUTPUT_DIR / "multi_horizon_example.png"
         short_horizon_trajectory_path = OUTPUT_DIR / "short_horizon_trajectories.png"
+        short_horizon_mape_path = OUTPUT_DIR / "short_horizon_mape.png"
         multi_predictions.to_csv(multi_predictions_path, index=False, encoding="utf-8-sig")
         multi_metrics.to_csv(multi_metrics_path, index=False, encoding="utf-8-sig")
         plot_multi_horizon_metrics(multi_metrics, multi_metrics_plot_path)
         example_origin = select_common_example_origin(multi_predictions)
         plot_multi_horizon_example(prices, multi_predictions, example_origin, multi_example_path)
         plot_short_horizon_trajectories(prices, multi_predictions, short_horizon_trajectory_path)
+        plot_short_horizon_mape(multi_metrics, short_horizon_mape_path)
         outputs.update(
             {
                 "multi_horizon_predictions": multi_predictions_path,
@@ -1055,6 +1106,7 @@ def run_prediction_experiment(
                 "multi_horizon_metrics_plot": multi_metrics_plot_path,
                 "multi_horizon_example": multi_example_path,
                 "short_horizon_trajectories": short_horizon_trajectory_path,
+                "short_horizon_mape": short_horizon_mape_path,
             }
         )
     return outputs
